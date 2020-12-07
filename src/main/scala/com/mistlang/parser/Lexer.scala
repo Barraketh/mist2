@@ -12,7 +12,7 @@ class Lexer {
   val lexGrammar: ValueParser[ArrayBuffer[Token]] = {
 
     val simpleToken = {
-      val simpleTokenMap = Map[String, TokenV](
+      val simpleTokenMap = List[(String, TokenV)](
         "==" -> EqEq,
         "&&" -> And,
         "||" -> Or,
@@ -34,7 +34,7 @@ class Lexer {
 
       simpleTokenMap
         .map(e => Exact(e._1).!.mapValue(_ => e._2))
-        .reduce((first, second) => first | second)
+        .reduceLeft((first, second) => first | second)
     }
 
     // TODO: Add escape sequences
