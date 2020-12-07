@@ -1,44 +1,59 @@
 package com.mistlang.parser
 
+import com.mistlang.parser.ParseResult.{MatchedResult, ValueResult}
+
 import scala.collection.mutable.ArrayBuffer
 
-sealed trait ParseResult {
+sealed trait ParseResult[+Res <: ParsedValue] {
   def isSuccess: Boolean
+
+  def map[U <: ParsedValue](f: Res => U): ParseResult[U]
+
+  def flatMap[U <: ParsedValue](f: Res => ParseResult[U]): ParseResult[U]
 }
 
-sealed trait ParseSuccess extends ParseResult {
+object ParseResult {
+  type ValueResult[T] = ParseResult[Value[T]]
+  type MatchedResult = ParseResult[Matched]
+}
+
+case class ParseSuccess[Res <: ParsedValue](res: Res) extends ParseResult[Res] {
   override def isSuccess: Boolean = true
+
+  override def map[U <: ParsedValue](f: Res => U): ParseResult[U] = ParseSuccess(f(res))
+
+  override def flatMap[U <: ParsedValue](f: Res => ParseResult[U]): ParseResult[U] = {
+    f(res)
+  }
 }
 
-sealed trait ParseFail extends ParseResult {
+case class ParseFail(startIdx: Int, curIdx: Int, message: String) extends ParseResult[Nothing] {
   override def isSuccess: Boolean = false
+
+  override def map[U <: ParsedValue](f: Nothing => U): ParseResult[U] = this
+
+  override def flatMap[U <: ParsedValue](f: Nothing => ParseResult[U]): ParseResult[U] = this
 }
 
-sealed trait UnitResult extends ParseResult {
-  def pMap[Res <: ParseResult](f: (Int, Int) => Res): Res = this match {
-    case u: Unmatched => u.asInstanceOf[Res]
-    case Matched(start, end) => f(start, end)
-  }
-}
-sealed trait ValueResult[+T] extends ParseResult {
-  def pMap[Res <: ParseResult](f: (T, Int, Int) => Res): Res = this match {
-    case u: Unmatched => u.asInstanceOf[Res]
-    case Value(v, start, end) =>
-      f(v, start, end) // TODO: how do I actually fix the variance?
-  }
+sealed trait ParsedValue {
+  def start: Int
+  def end: Int
 
-  def map[U](f: T => U): ValueResult[U]
+  type AndMatched <: ParsedValue
+  type AndValue[T] <: ParsedValue
+  type Rep <: ParsedValue
 }
 
-case class Matched(start: Int, end: Int) extends UnitResult with ParseSuccess
-case class Value[T](value: T, start: Int, end: Int) extends ValueResult[T] with ParseSuccess {
-  override def map[U](f: T => U): ValueResult[U] = Value(f(value), start, end)
+case class Matched(start: Int, end: Int) extends ParsedValue {
+  override type AndMatched = Matched
+  override type AndValue[T] = Value[T]
+  override type Rep = Matched
+
 }
-case class Unmatched(startIdx: Int, curIdx: Int, message: String)
-  extends UnitResult
-    with ValueResult[Nothing]
-    with ParseFail {
-  override def map[U](f: Nothing => U): ValueResult[U] = this
+case class Value[T](value: T, start: Int, end: Int) extends ParsedValue {
+  override type AndMatched = Value[T]
+  override type AndValue[U] = Value[(T, U)]
+  override type Rep = Value[ArrayBuffer[T]]
 }
 
 trait ElemSeq[Elem, Repr] {
@@ -56,39 +71,65 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     def apply(idx: Int): Elem = elemSeq.apply(r, idx)
   }
 
-  trait Parser {
-    def parse(startIdx: Int)(implicit seq: Repr): ParseResult
+  trait Parser[Res <: ParsedValue] {
+    def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res]
+
+    def ~(other: MatchingParser): Parser[Res#AndMatched]
+    def ~[T](other: ValueParser[T]): Parser[Res#AndValue[T]]
+    def rep(min: Int = 0): Parser[Res#Rep]
+
   }
 
-  trait UnitParser extends Parser {
-    override def parse(startIdx: Int)(implicit seq: Repr): UnitResult
+  trait MatchingParser extends Parser[Matched] { self =>
+    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult
 
     def ! : ValueParser[Repr] = Capture(this)
 
-    def ~(other: UnitParser): UnitParser = AndParser(this, other)
+    def ~(other: MatchingParser): MatchingParser = new MatchingParser {
+      override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult =  for {
+        res1 <- self.parse(startIdx)
+        res2 <- other.parse(res1.end)
+      } yield (Matched(res1.start, res2.end))
+    }
 
-    def ~[V](other: ValueParser[V]): ValueParser[V] = AndParser(this, other)
+    def ~[V](other: ValueParser[V]): ValueParser[V] = new ValueParser[V] {
+      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = for {
+        res1 <- self.parse(startIdx)
+        res2 <- other.parse(res1.end)
+      } yield (Value(res2.value, res1.start, res2.end))
+    }
 
-    def rep(min: Int = 0): UnitParser = Rep(this, min)
+    def rep(min: Int = 0): MatchingParser = Rep(this, min)
 
-    def |(other: UnitParser): UnitParser = {
+    def |(other: MatchingParser): MatchingParser = {
       (this, other) match {
-        case (UnitOr(myParsers), UnitOr(otherParsers)) => UnitOr(myParsers ::: otherParsers)
-        case (UnitOr(myParsers), o) => UnitOr(myParsers :+ o)
-        case (m, UnitOr(otherParsers)) => UnitOr(m :: otherParsers)
-        case (m, o) => UnitOr(m :: o :: Nil)
+        case (MatchingOr(myParsers), MatchingOr(otherParsers)) => MatchingOr(myParsers ::: otherParsers)
+        case (MatchingOr(myParsers), o) => MatchingOr(myParsers :+ o)
+        case (m, MatchingOr(otherParsers)) => MatchingOr(m :: otherParsers)
+        case (m, o) => MatchingOr(m :: o :: Nil)
       }
     }
   }
 
-  trait ValueParser[T] extends Parser { self =>
+  trait ValueParser[T] extends Parser[Value[T]] { self =>
     override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T]
 
-    def ~(other: UnitParser): ValueParser[T] = new ValueParser[T] {
-      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T] = self.parse(startIdx)
-    }//AndParser(this, other)
+    def ~(other: MatchingParser): ValueParser[T] = new ValueParser[T] {
+      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T] = self.parse(startIdx).flatMap { res1 =>
+        other.parse(res1.end).map { res2 =>
+          Value(res1.value, res1.start, res2.end)
+        }
+      }
+    }
 
-    def ~[V](other: ValueParser[V]): ValueParser[(T, V)] = AndParser(this, other)
+    def ~[V](other: ValueParser[V]): ValueParser[(T, V)] = new ValueParser[(T, V)] {
+      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[(T, V)] =
+        self.parse(startIdx).flatMap { res1 =>
+          other.parse(res1.end).map { res2 =>
+            Value((res1.value, res2.value), res1.start, res2.end)
+          }
+        }
+    }
 
     def rep(min: Int = 0): ValueParser[ArrayBuffer[T]] = Rep(this, min)
 
@@ -104,129 +145,65 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    def map[V](f: T => V): ValueParser[V] = {
-      new ValueParser[V] {
-        override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = self.parse(startIdx).map(f)
-      }
+    def map[V](f: Value[T] => Value[V]): ValueParser[V] = new ValueParser[V] {
+      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = self.parse(startIdx).map(f)
     }
 
-
-
-    //    def pMap[V](f: (T, Int, Int) => V): ValueParser[V] = {
-    //      def p(idx: Int)(implicit seq: Repr): ValueResult[T] = parse(idx)
-    //
-    //      new ValueParser[V] {
-    //        override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = p(startIdx).pMap(f)
-    //      }
-    //    }
+    def mapValue[V](f: T => V): ValueParser[V] = new ValueParser[V] {
+      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] =
+        self.parse(startIdx).map(res => Value(f(res.value), res.start, res.end))
+    }
   }
 
 
-  case class Exact(s: Repr) extends UnitParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = {
+  case class Exact(s: Repr) extends MatchingParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
       var i: Int = 0
       var j: Int = startIdx
       while (i < s.length) {
         if (s(i) != seq(j))
-          return Unmatched(startIdx, j, s"Expected ${s(i)}, got ${seq(j)}")
+          return ParseFail(startIdx, j, s"Expected ${s(i)}, got ${seq(j)}")
         i += 1
         j += 1
       }
-      Matched(startIdx, startIdx + s.length)
+      ParseSuccess(Matched(startIdx, startIdx + s.length))
     }
   }
 
-  case class Single(pred: Elem => Boolean) extends UnitParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = {
-      if (pred(seq(startIdx))) Matched(startIdx, startIdx + 1)
-      else Unmatched(startIdx, startIdx, s"Predicate doesn't match ${seq(startIdx)}")
+  case class Single(pred: Elem => Boolean) extends MatchingParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
+      if (pred(seq(startIdx))) ParseSuccess(Matched(startIdx, startIdx + 1))
+      else ParseFail(startIdx, startIdx, s"Predicate doesn't match ${seq(startIdx)}")
     }
   }
 
-  case class While(pred: Elem => Boolean) extends UnitParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = {
+  case class While(pred: Elem => Boolean) extends MatchingParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
       var curIdx = startIdx
       while (curIdx < seq.length && pred(seq(curIdx))) {
         curIdx += 1
       }
-      Matched(startIdx, curIdx)
+      ParseSuccess(Matched(startIdx, curIdx))
     }
   }
 
-  case class Capture(p: UnitParser) extends ValueParser[Repr] {
+  case class Capture(p: MatchingParser) extends ValueParser[Repr] {
     override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[Repr] = {
       p.parse(startIdx) match {
-        case Matched(start, end) =>
+        case ParseSuccess(Matched(start, end)) =>
           val buffer = new ArrayBuffer[Elem](end - start)
           for (i <- start until end) {
             buffer += seq(i)
           }
-          Value(elemSeq.build(buffer), start, end)
-        case t: Unmatched => t
+          ParseSuccess(Value(elemSeq.build(buffer), start, end))
+        case t: ParseFail => t
       }
     }
   }
 
-  object AndParser {
-    def and(first: Matched, second: Matched) = Matched(first.start, second.end)
-
-    def and[T](first: Matched, second: Value[T]) = Value[T](second.value, first.start, second.end)
-
-    def and[T](first: Value[T], second: Matched) = Value[T](first.value, first.start, second.end)
-
-    def and[T, U](first: Value[T], second: Value[U]) = Value[(T, U)](
-      (first.value, second.value), first.start, second.end)
-
-    def apply[U, V](first: ValueParser[U], second: ValueParser[V]): ValueParser[(U, V)] =
-      new ValueParser[(U, V)] {
-        override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[(U, V)] = {
-          first.parse(startIdx).pMap {
-            case (v1, start1, end1) =>
-              second.parse(end1).pMap {
-                case (v2, _, end2) => Value((v1, v2), start1, end2)
-              }
-          }
-        }
-      }
-
-    def apply[V](first: ValueParser[V], second: UnitParser): ValueParser[V] =
-      new ValueParser[V] {
-        override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = {
-          first.parse(startIdx).pMap {
-            case (v, start1, end1) =>
-              second.parse(end1).pMap {
-                case (_, end2) => Value(v, start1, end2)
-              }
-          }
-        }
-      }
-
-    def apply[V](first: UnitParser, second: ValueParser[V]): ValueParser[V] =
-      new ValueParser[V] {
-        override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] = {
-          first.parse(startIdx).pMap {
-            case (start, end1) =>
-              second.parse(end1).pMap {
-                case (v, _, end2) => Value(v, start, end2)
-              }
-          }
-        }
-      }
-
-    def apply(first: UnitParser, second: UnitParser): UnitParser =
-      new UnitParser {
-        override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = first.parse(startIdx).pMap {
-          case (start, end1) =>
-            second.parse(end1).pMap {
-              case (_, end2) => Matched(start, end2)
-            }
-        }
-      }
-  }
-
   object Rep {
-    def apply(p: UnitParser, min: Int): UnitParser = new UnitParser {
-      override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = {
+    def apply(p: MatchingParser, min: Int): MatchingParser = new MatchingParser {
+      override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
         var curIdx = startIdx
         var count = 0
 
@@ -234,14 +211,14 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
         while (curMatch.isSuccess) {
           count += 1
-          val m = curMatch.asInstanceOf[Matched]
-          curIdx = m.end
+          val m = curMatch.asInstanceOf[ParseSuccess[Matched]]
+          curIdx = m.res.end
 
           curMatch = p.parse(curIdx)
         }
 
-        if (count >= min) Matched(startIdx, curIdx)
-        else Unmatched(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
+        if (count >= min) ParseSuccess(Matched(startIdx, curIdx))
+        else ParseFail(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
       }
     }
 
@@ -263,14 +240,14 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
             curMatch = p.parse(curIdx)
           }
 
-          if (count >= min) Value(buffer, startIdx, curIdx)
-          else Unmatched(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
+          if (count >= min) ParseSuccess(Value(buffer, startIdx, curIdx))
+          else ParseFail(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
         }
       }
   }
 
-  case class UnitOr(parsers: List[UnitParser]) extends UnitParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): UnitResult = {
+  case class MatchingOr(parsers: List[MatchingParser]) extends MatchingParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
       var i: Int = 0
       while (i < parsers.length) {
         val res = parsers(i).parse(startIdx)
@@ -278,7 +255,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
         i += 1
       }
-      Unmatched(startIdx, startIdx, "No parser matches")
+      ParseFail(startIdx, startIdx, "No parser matches")
     }
   }
 
@@ -287,12 +264,12 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[U] = {
       var i: Int = 0
       while (i < parsers.length) {
-        val res = parsers(i).parse(startIdx)
+        val res = parsers(i).parse(startIdx).asInstanceOf[ValueResult[U]]
         if (res.isSuccess) return res
 
         i += 1
       }
-      Unmatched(startIdx, startIdx, "No parser matches")
+      ParseFail(startIdx, startIdx, "No parser matches")
     }
   }
 }
