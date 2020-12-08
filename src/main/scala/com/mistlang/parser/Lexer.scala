@@ -14,22 +14,22 @@ class Lexer {
     val simpleToken = {
       val simpleTokenMap = List[(String, TokenV)](
         "==" -> EqEq,
-        "&&" -> And,
-        "||" -> Or,
-        "(" -> OpenParen,
-        ")" -> CloseParen,
-        "{" -> OpenBrace,
-        "}" -> CloseBrace,
-        "[" -> OpenBracket,
-        "]" -> CloseBracket,
-        "\n" -> Newline,
-        "," -> Comma,
-        "=" -> Eq,
-        "." -> Period,
-        "+" -> Plus,
-        "-" -> Minus,
-        "*" -> Mult,
-        "/" -> Div
+        "&&" -> `&&`,
+        "||" -> `||`,
+        "(" -> `(`,
+        ")" -> `)`,
+        "{" -> `{`,
+        "}" -> `}`,
+        "[" -> `[`,
+        "]" -> `]`,
+        "\n" -> `\n`,
+        "," -> `,`,
+        "=" -> `=`,
+        "." -> `.`,
+        "+" -> `+`,
+        "-" -> `-`,
+        "*" -> `*`,
+        "/" -> `/`
       )
 
       simpleTokenMap
@@ -79,28 +79,29 @@ sealed trait TokenV
 object TokenV {
 
   // Single char tokens
-  case object OpenBrace extends TokenV
-  case object CloseBrace extends TokenV
-  case object OpenParen extends TokenV
-  case object CloseParen extends TokenV
-  case object OpenBracket extends TokenV
-  case object CloseBracket extends TokenV
-  case object Newline extends TokenV
-  case object Comma extends TokenV
-  case object Eq extends TokenV
-  case object Period extends TokenV
-  case object Plus extends TokenV
-  case object Minus extends TokenV
-  case object Mult extends TokenV
-  case object Div extends TokenV
+  case object `{` extends TokenV
+  case object `}` extends TokenV
+  case object `(` extends TokenV
+  case object `)` extends TokenV
+  case object `[` extends TokenV
+  case object `]` extends TokenV
+  case object `\n` extends TokenV
+  case object `,` extends TokenV
+  case object `=` extends TokenV
+  case object `.` extends TokenV
+  case object `+` extends TokenV
+  case object `-` extends TokenV
+  case object `*` extends TokenV
+  case object `/` extends TokenV
 
-  // Two char tokens (have to be handles first)
+  // Two char tokens (have to be handled first)
+  // Eq would normally be called `==`, but scala already has that predefined in a way that conflicts
   case object EqEq extends TokenV
-  case object And extends TokenV
-  case object Or extends TokenV
+  case object `&&` extends TokenV
+  case object `||` extends TokenV
 
   // Multi-char tokens
   case class StringToken(value: String) extends TokenV
   case class Ident(value: String) extends TokenV
-  case class Number(intPart: String, expPart: Option[String], positive: Boolean = true) extends TokenV
+  case class Number(intPart: String, expPart: Option[String] = None, positive: Boolean = true) extends TokenV
 }
