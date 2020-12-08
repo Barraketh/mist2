@@ -9,7 +9,7 @@ class ParserTest extends FunSuite with Matchers {
     val p = ("abc".p ~ "d".rep(3).! ~ "e").mapValue(_.length)
     implicit val seq: String = "abcdddddeee"
     val res = p.parse(0)
-    res shouldEqual ParseSuccess(Value(5, 0, 9))
+    res shouldEqual PSuccess(Value(5, 0, 9))
   }
 
 

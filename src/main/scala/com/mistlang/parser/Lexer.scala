@@ -9,7 +9,7 @@ class Lexer {
 
   import TokenV._
 
-  val lexGrammar: ValueParser[ArrayBuffer[Token]] = {
+  val lexGrammar: VParser[ArrayBuffer[Token]] = {
 
     val simpleToken = {
       val simpleTokenMap = List[(String, TokenV)](
@@ -66,8 +66,8 @@ class Lexer {
 
   def lex(s: String): ArrayBuffer[Token] = {
     lexGrammar.run(0)(s) match {
-      case ParseSuccess(res) => res.value
-      case p: ParseFail => throw new RuntimeException(p.toString)
+      case PSuccess(res) => res.value
+      case p: PFail => throw new RuntimeException(p.toString)
     }
   }
 

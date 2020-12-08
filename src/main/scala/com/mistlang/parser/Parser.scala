@@ -1,183 +1,284 @@
 package com.mistlang.parser
 
-import com.mistlang.parser.ParseResult.{MatchedResult, ValueResult}
-
 import scala.collection.mutable.ArrayBuffer
 
-sealed trait ParseResult[+Res <: ParsedValue] {
-  def isSuccess: Boolean
-
-  def map[U <: ParsedValue](f: Res => U): ParseResult[U]
-
-  def flatMap[U <: ParsedValue](f: Res => ParseResult[U]): ParseResult[U]
-}
-
-object ParseResult {
-  type ValueResult[T] = ParseResult[Value[T]]
-  type MatchedResult = ParseResult[Matched]
-}
-
-case class ParseSuccess[Res <: ParsedValue](res: Res) extends ParseResult[Res] {
-  override def isSuccess: Boolean = true
-
-  override def map[U <: ParsedValue](f: Res => U): ParseResult[U] = ParseSuccess(f(res))
-
-  override def flatMap[U <: ParsedValue](f: Res => ParseResult[U]): ParseResult[U] = f(res)
-}
-
-case class ParseFail(startIdx: Int, curIdx: Int, message: String) extends ParseResult[Nothing] {
-  override def isSuccess: Boolean = false
-
-  override def map[U <: ParsedValue](f: Nothing => U): ParseResult[U] = this
-
-  override def flatMap[U <: ParsedValue](f: Nothing => ParseResult[U]): ParseResult[U] = this
-}
-
-sealed trait ParsedValue {
+/**
+ * A result of a successful parse.
+ */
+sealed trait PValue {
+  // The start of the matched input
   def start: Int
 
+  // The end of the matched input
   def end: Int
 }
 
-case class Matched(start: Int, end: Int) extends ParsedValue
+/**
+ * A parse value that only consumes input
+ */
+case class Matched(start: Int, end: Int) extends PValue
 
-case class Value[+T](value: T, start: Int, end: Int) extends ParsedValue
+/**
+ * A parse value that both consumes input and carries a value
+ */
+case class Value[+T](value: T, start: Int, end: Int) extends PValue
 
+/**
+ * Result of a parse
+ */
+sealed trait PResult[+Res <: PValue] {
+  def isSuccess: Boolean
+
+  def map[U <: PValue](f: Res => U): PResult[U]
+
+  def flatMap[U <: PValue](f: Res => PResult[U]): PResult[U]
+}
+
+case class PSuccess[Res <: PValue](res: Res) extends PResult[Res] {
+  override def isSuccess: Boolean = true
+
+  override def map[U <: PValue](f: Res => U): PResult[U] = PSuccess(f(res))
+
+  override def flatMap[U <: PValue](f: Res => PResult[U]): PResult[U] = f(res)
+}
+
+case class PFail(startIdx: Int, curIdx: Int, message: String) extends PResult[Nothing] {
+  override def isSuccess: Boolean = false
+
+  override def map[U <: PValue](f: Nothing => U): PResult[U] = this
+
+  override def flatMap[U <: PValue](f: Nothing => PResult[U]): PResult[U] = this
+}
+
+/**
+ * Operations on sequence of type Repr
+ * @tparam Elem : Underlying element of the sequence
+ * @tparam Repr : Type of the sequence
+ */
 trait ElemSeq[Elem, Repr] {
   def length(r: Repr): Int
 
   def apply(r: Repr, idx: Int): Elem
 
-  def build(buffer: ArrayBuffer[Elem]): Repr
-
   def slice(r: Repr, from: Int, until: Int): Repr
 }
 
+/**
+ * Convenient way to carry shared context amongst all the parsers in a given run.
+ * Currently only used to share Elem and Repr, but probably seq should also be here instead of as an implicit
+ * on all the Parser.parse() methods.
+ *
+ * The sequence type and operations are given by Elem, Repr, ElemSeq.  We do this because we want to be able to
+ * operate on both Arrays and Strings, so we need to introduce an abstraction. Currently, we only need to index
+ * and take subsequences.
+ *
+ * @tparam Elem : single element of the sequence
+ * @tparam Repr : the sequence representation.
+ * @param elemSeq : the necessary operations on Repr
+ */
 class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
-  implicit class ReprOps(r: Repr) {
-    def length: Int = elemSeq.length(r)
+  // Matching Parser. Consumes input but carries no value
+  type MParser = Parser[Matched]
 
-    def apply(idx: Int): Elem = elemSeq.apply(r, idx)
+  // Value Parser. Consumes input and carries a value
+  type VParser[T] = Parser[Value[T]]
 
-    def slice(from: Int, until: Int): Repr = elemSeq.slice(r, from, until)
-  }
+  type MRes = PResult[Matched]
+  type VRes[T] = PResult[Value[T]]
 
-  trait Parser[Res <: ParsedValue] {
+  /**
+   * The base of the parser combinator library
+   */
+  trait Parser[Val <: PValue] {
 
-    def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res]
+    /**
+     * The key function of a parser. Tries to match the input starting at startIdx.
+     * If successful, will return a PSuccess[Val], which carries the parsed value,
+     * the start (startIdx) and the end. The next parser will start at the end index,
+     * thus consuming the input
+     *
+     * PFAil indicates a parse failure and does not consume any input.
+     *
+     * @param startIdx : Index in the seq where to start parsing
+     * @param seq : The sequence to parse.
+     *            // TODO: Should this be part of the ParseContext?
+     * @return PResult
+     */
+    def parse(startIdx: Int)(implicit seq: Repr): PResult[Val]
 
-    def ~[U <: ParsedValue](other: Parser[U])(implicit ander: Ander[Res, U]): ander.Out = ander.and(this, other)
-
-    def rep(min: Int = 0)(implicit r: Rep[Res]): r.Out = r.rep(this, min)
-
-    def ?(implicit optioner: Optioner[Res]): optioner.Out = optioner.opt(this)
-
-    def run(startIdx: Int)(implicit seq: Repr): ParseResult[Res] = {
+    /**
+     * Parse and then check if the result has consumed the entire sequence.
+     */
+    def run(startIdx: Int)(implicit seq: Repr): PResult[Val] = {
       parse(startIdx) match {
-        case p@ParseSuccess(res) if res.end == seq.length => p
-        case p: ParseSuccess[Res] =>
-          ParseFail(startIdx,
+        case p@PSuccess(res) if res.end == seq.length => p
+        case p: PSuccess[Val] =>
+          PFail(startIdx,
             p.res.end,
             s"Failed to consume input starting at ${p.res.end}")
-        case p: ParseFail => p
+        case p: PFail => p
       }
     }
 
+    /**
+     * Creates parser that runs this, and then other, and captures the results of both if both are successful
+     * See AndParser for more information
+     *
+     * @param and : an implicit AndParser builder. And.Out lets us encode the algebra of combining values
+     */
+    def ~[U <: PValue](other: Parser[U])(implicit and: And[Val, U]): and.Out = and.and(this, other)
+
+    /**
+     * Creates a parser that runs this, and if unsuccessful then will try other, and will return success if
+     * either parse succeeds.
+     * See OrParser for more information
+     *
+     * @tparam U : the supertype of Val and V. This might be simpler if we could make Parser covariant,
+     *           but that seems to break in a number of ways.
+     * @param or : an implicit OrParser builder
+     */
+    def |[U >: Val <: PValue, V <: U](other: Parser[V])(implicit or: Or[U]): Parser[U] =
+      or.or(this.asInstanceOf[Parser[U]], other.asInstanceOf[Parser[U]])
+
+    /**
+     * Creates a parser that runs this repeatedly until failure or all input is consumed.
+     * Will only fail if the number of repetitions < min
+     * VParser accumulates it's values in an ArrayBuffer.
+     * MParser simply consumes its input
+     *
+     * See RepParser for more information
+     */
+    def rep(min: Int = 0)(implicit r: Rep[Val]): r.Out = r.rep(this, min)
+
+
+    /**
+     * Creates a parser that will optionally run this, but will still return a success
+     * (without consuming any input) if the run fails.
+     *
+     * Transforms a VParser[T] into a VParser[ Option[T] ], where the Option represents
+     * the success or failure of the parse.
+     * MParser stays the same as always
+     *
+     * See OptParser for more information
+     */
+    def ?(implicit opt: Opt[Val]): opt.Out = opt.opt(this)
+
   }
 
-  trait MatchingParser extends Parser[Matched] {
-    self =>
-
-    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult
-
-    def ! : ValueParser[Repr] = Capture(this)
-
-    def |(other: MatchingParser): MatchingParser = Or(this, other)
-  }
-
-  trait ValueParser[T] extends Parser[Value[T]] {
-    self =>
-
-    override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T]
-
-    def |[U >: T, V <: U](other: ValueParser[V]): ValueParser[U] =
-      Or(this, other)
-
-    def map[V](f: Value[T] => Value[V]): ValueParser[V] = new ValueParser[V] {
-      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] =
-        self.parse(startIdx).map(f)
+  object Parser {
+    implicit class MatchedOps(p: Parser[Matched]) {
+      /**
+       * Captures the result of the parse as a Repr.
+       * This is the way we go from a MParser (which carries no value), to a VParser that does
+       */
+      def ! : VParser[Repr] = Capture(p)
     }
 
-    def mapValue[V](f: T => V): ValueParser[V] = new ValueParser[V] {
-      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] =
-        self.parse(startIdx).map(res => Value(f(res.value), res.start, res.end))
+    implicit class ValueOps[T](p: VParser[T]) {
+      /**
+       * Standard mapping functions to map VParsers
+       */
+      def map[V](f: Value[T] => Value[V]): VParser[V] = new VParser[V] {
+        override def parse(startIdx: Int)(implicit seq: Repr): VRes[V] =
+          p.parse(startIdx).map(f)
+      }
+
+      def mapValue[V](f: T => V): VParser[V] = new VParser[V] {
+        override def parse(startIdx: Int)(implicit seq: Repr): VRes[V] =
+          p.parse(startIdx).map(res => Value(f(res.value), res.start, res.end))
+      }
     }
   }
 
-  trait Optioner[T <: ParsedValue] {
+  /**
+   * Typeclass builder for OptParser
+   *
+   * OptParser tries to match p, but if it fails it will still return a successful parse
+   * If p is a VParser[T], we will build a VParser[ Opt[T] ], and a failure wil result in None as the value
+   * If p is an MParser, we will just build an MParser
+   * In both cases, on failure end = startIdx, so no input is consumed
+   */
+  trait Opt[T <: PValue] {
     type Out
 
     def opt(p1: Parser[T]): Out
   }
 
-  object Optioner {
-    trait OptionerAux[V1 <: ParsedValue, T] extends Optioner[V1] {
+  object Opt {
+    /**
+     * Implementation of the OptParser
+     *
+     * @param p : Underlying parser
+     * @param f : Maps the successfully parsed value. Enables the Value[T] -> Value[ Option[T] ] mapping
+     * @param default : Since we return ParseSuccess on failure, need a default parsed value
+     */
+    class OptParser[In <: PValue, Out <: PValue](p: Parser[In], f: In => Out, default: Int => Out)
+      extends Parser[Out] {
+
+      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Out] = {
+        p.parse(startIdx) match {
+          case PSuccess(res) => PSuccess(f(res))
+          case _: PFail => PSuccess(default(startIdx))
+        }
+      }
+    }
+
+    /**
+     * Concrete implementations & implicits for the type class
+     */
+
+    trait OptAux[V1 <: PValue, T] extends Opt[V1] {
       override type Out = T
     }
 
-    implicit val opt1 = new OptionerAux[Matched, MatchingParser] {
-      override def opt(p1: Parser[Matched]): MatchingParser = new MatchingParser {
-        override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult =
-          p1.parse(startIdx) match {
-            case p: ParseSuccess[Matched] => p
-            case _: ParseFail => ParseSuccess(Matched(startIdx, startIdx))
-          }
-      }
+    implicit val opt1: OptAux[Matched, MParser] = new OptAux[Matched, MParser] {
+      override def opt(p1: Parser[Matched]): MParser =
+        new OptParser[Matched, Matched](p1, res => res, idx => Matched(idx, idx))
     }
 
-    implicit def opt2[T] = new OptionerAux[Value[T], ValueParser[Option[T]]] {
+    implicit def opt2[T]: OptAux[Value[T], VParser[Option[T]]] =
+      new OptAux[Value[T], VParser[Option[T]]] {
 
-      override def opt(p1: Parser[Value[T]]): Out = new ValueParser[Option[T]] {
-        override def parse(startIdx: Int)(
-          implicit seq: Repr): ValueResult[Option[T]] =
-          p1.parse(startIdx) match {
-            case ParseSuccess(Value(value, start, end)) =>
-              ParseSuccess(Value(Some(value), start, end))
-            case _: ParseFail => ParseSuccess(Value(None, startIdx, startIdx))
-          }
-      }
+      override def opt(p1: Parser[Value[T]]): Out = new OptParser[Value[T], Value[Option[T]]](
+        p1, res => res.copy(value = Some(res.value)), idx => Value(None,idx, idx)
+      )
     }
   }
 
 
-  trait Ander[V1 <: ParsedValue, V2 <: ParsedValue] {
+  /**
+   * Typeclass for building AndParser(p1, p2)
+   *
+   * An AndParser runs p1 and then runs p2 with the following conceptual algebra:
+   *   And[ Matched, Matched ] => Matched
+   *   And[ Matched, Value[T] ] => Value[T]
+   *   And[ Value[T], Matched ] => Value[T]
+   *   And[ Value[T], Value[U] ] => Value[T, U]
+   *
+   */
+  trait And[V1 <: PValue, V2 <: PValue] {
     type Out
 
     def and(p1: Parser[V1], p2: Parser[V2]): Out
   }
 
-  object Ander {
+  object And {
 
-    class AnderAux[V1 <: ParsedValue, V2 <: ParsedValue, T](f: (Parser[V1], Parser[V2]) => T)
-      extends Ander[V1, V2] {
-
-      override type Out = T
-      override def and(p1: Parser[V1], p2: Parser[V2]): T = f(p1, p2)
-    }
-
-    implicit val and1 = new AnderAux[Matched, Matched, MatchingParser](And1)
-    implicit def and2[V1] = new AnderAux[Matched, Value[V1], ValueParser[V1]](And2(_, _))
-    implicit def and3[V1] = new AnderAux[Value[V1], Matched, ValueParser[V1]](And3(_, _))
-    implicit def and4[V1, V2] = new AnderAux[Value[V1], Value[V2], ValueParser[(V1, V2)]](And4(_, _))
-
-    trait And[V1 <: ParsedValue, V2 <: ParsedValue, Res <: ParsedValue] extends Parser[Res] {
+    /**
+     * AndParser implementation
+     * Runs p1, and then p2
+     */
+    trait AndParser[V1 <: PValue, V2 <: PValue, Res <: PValue] extends Parser[Res] {
       def p1: Parser[V1]
-
       def p2: Parser[V2]
 
+      /**
+       * Combines two successful results of p1 and p2 into single result.
+       * This is what actually implements our algebra
+       */
       def build(v1: V1, v2: V2): Res
 
-      override def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res] = {
+      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Res] = {
         for {
           res1 <- p1.parse(startIdx)
           res2 <- p2.parse(res1.end)
@@ -185,113 +286,51 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
+    /**
+     * Specific instances & implicits for the typeclass
+     */
+
+    class AndAux[V1 <: PValue, V2 <: PValue, T](f: (Parser[V1], Parser[V2]) => T) extends And[V1, V2] {
+      override type Out = T
+      override def and(p1: Parser[V1], p2: Parser[V2]): T = f(p1, p2)
+    }
+
+    implicit val and1 = new AndAux[Matched, Matched, MParser](And1)
+    implicit def and2[V1] = new AndAux[Matched, Value[V1], VParser[V1]](And2(_, _))
+    implicit def and3[V1] = new AndAux[Value[V1], Matched, VParser[V1]](And3(_, _))
+    implicit def and4[V1, V2] = new AndAux[Value[V1], Value[V2], VParser[(V1, V2)]](And4(_, _))
+
     case class And1(p1: Parser[Matched], p2: Parser[Matched]) extends
-      And[Matched, Matched, Matched] with MatchingParser {
+      AndParser[Matched, Matched, Matched] with MParser {
       override def build(v1: Matched, v2: Matched): Matched = Matched(v1.start, v2.end)
     }
 
-    case class And2[T](p1: Parser[Matched], p2: Parser[Value[T]])
-      extends And[Matched, Value[T], Value[T]] with ValueParser[T] {
+    case class And2[T](p1: Parser[Matched], p2: VParser[T])
+      extends AndParser[Matched, Value[T], Value[T]] with VParser[T] {
       override def build(v1: Matched, v2: Value[T]): Value[T] = Value(v2.value, v1.start, v2.end)
     }
 
-    case class And3[T](p1: Parser[Value[T]], p2: Parser[Matched]) extends
-      And[Value[T], Matched, Value[T]] with ValueParser[T] {
+    case class And3[T](p1: VParser[T], p2: Parser[Matched]) extends
+      AndParser[Value[T], Matched, Value[T]] with VParser[T] {
       override def build(v1: Value[T], v2: Matched): Value[T] = Value(v1.value, v1.start, v2.end)
     }
 
-    case class And4[T, U](p1: Parser[Value[T]], p2: Parser[Value[U]]) extends
-      And[Value[T], Value[U], Value[(T, U)]] with ValueParser[(T, U)] {
+    case class And4[T, U](p1: VParser[T], p2: VParser[U]) extends
+      AndParser[Value[T], Value[U], Value[(T, U)]] with VParser[(T, U)] {
       override def build(v1: Value[T], v2: Value[U]): Value[(T, U)] = Value(v1.value -> v2.value, v1.start, v2.end)
     }
 
   }
 
-  case class Exact(s: Repr) extends MatchingParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
-      val endIdx = startIdx + s.length
-      if (endIdx > seq.length)
-        ParseFail(startIdx, startIdx, s"$s is longer than remaining sequence")
-      else {
-        val maybeMatch = seq.slice(startIdx, endIdx)
-        if (maybeMatch == s) ParseSuccess(Matched(startIdx, endIdx))
-        else
-          ParseFail(startIdx,
-            startIdx,
-            s"Exact match failed: expected $s, got $maybeMatch")
-      }
-    }
-  }
-
-  case class Single(pred: Elem => Boolean) extends MatchingParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
-      if (startIdx >= seq.length)
-        ParseFail(startIdx, startIdx, s"Index $startIdx out of bounds")
-      if (pred(seq(startIdx))) ParseSuccess(Matched(startIdx, startIdx + 1))
-      else
-        ParseFail(startIdx,
-          startIdx,
-          s"Predicate doesn't match ${seq(startIdx)}")
-    }
-  }
-
-  case class While(pred: Elem => Boolean) extends MatchingParser {
-    override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult = {
-      var curIdx = startIdx
-      while (curIdx < seq.length && pred(seq(curIdx))) {
-        curIdx += 1
-      }
-      ParseSuccess(Matched(startIdx, curIdx))
-    }
-  }
-
-  case class Capture(p: MatchingParser) extends ValueParser[Repr] {
-    override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[Repr] = {
-      p.parse(startIdx) match {
-        case ParseSuccess(Matched(start, end)) =>
-          val buffer = new ArrayBuffer[Elem](end - start)
-          for (i <- start until end) {
-            buffer += seq(i)
-          }
-          ParseSuccess(Value(elemSeq.build(buffer), start, end))
-        case t: ParseFail => t
-      }
-    }
-  }
-
-  trait RepAux[In <: ParsedValue, Out <: ParsedValue, Acc <: Rep.Accumulator[In]] extends Parser[Out] {
-    def p: Parser[In]
-
-    def min: Int
-
-    protected def newAccumulator: Acc
-
-    protected def buildValue(accumulator: Acc, start: Int, end: Int): Out
-
-    override def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Out] = {
-      var curIdx = startIdx
-      var count = 0
-      val buffer = newAccumulator
-
-      var curMatch: ParseResult[In] = null
-
-      while (curIdx < seq.length && {
-        curMatch = p.parse(curIdx)
-        curMatch.isSuccess
-      }) {
-        count += 1
-        val m = curMatch.asInstanceOf[ParseSuccess[In]]
-        curIdx = m.res.end
-        buffer.append(m.res)
-      }
-
-      if (count >= min) ParseSuccess(buildValue(buffer, startIdx, curIdx))
-      else
-        ParseFail(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
-    }
-  }
-
-  trait Rep[T <: ParsedValue] {
+  /**
+   * Typeclass builder for RepParser
+   *
+   * RepParser tries to match as many repetitions of p as it can.
+   * If it succeeds, returns an accumulation of the parse results
+   * If it fails to parse the min number of repetitions, returns an error
+   *
+   */
+  trait Rep[T <: PValue] {
     type Out
 
     def rep(p1: Parser[T], min: Int): Out
@@ -301,6 +340,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     trait Accumulator[In] {
       def append(r: In): Unit
     }
+
     object UnitAccumulator extends Accumulator[Matched] {
       override def append(r: Matched): Unit = ()
     }
@@ -314,8 +354,46 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    case class MatchingRep(p: Parser[Matched], min: Int) extends MatchingParser with
-      RepAux[Matched, Matched, UnitAccumulator.type] {
+    /**
+     * RepParser implementation
+     *
+     * @tparam In : Type of input parser value
+     * @tparam Out : Type of accumulated value
+     * @tparam Acc : Type of accumulator
+     */
+    trait RepParser[In <: PValue, Out <: PValue, Acc <: Rep.Accumulator[In]] extends Parser[Out] {
+      def p: Parser[In]
+
+      def min: Int
+
+      protected def newAccumulator: Acc
+
+      protected def buildValue(accumulator: Acc, start: Int, end: Int): Out
+
+      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Out] = {
+        var curIdx = startIdx
+        var count = 0
+        val buffer = newAccumulator
+
+        var curMatch: PResult[In] = null
+
+        while (curIdx < seq.length && {
+          curMatch = p.parse(curIdx)
+          curMatch.isSuccess
+        }) {
+          count += 1
+          val m = curMatch.asInstanceOf[PSuccess[In]]
+          curIdx = m.res.end
+          buffer.append(m.res)
+        }
+
+        if (count >= min) PSuccess(buildValue(buffer, startIdx, curIdx))
+        else PFail(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
+      }
+    }
+
+    case class MatchingRep(p: Parser[Matched], min: Int) extends MParser with
+      RepParser[Matched, Matched, UnitAccumulator.type] {
 
       override protected def newAccumulator: UnitAccumulator = UnitAccumulator
 
@@ -323,8 +401,8 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
         Matched(start, end)
     }
 
-    case class ValueRep[T](p: Parser[Value[T]], min: Int)
-      extends ValueParser[ArrayBuffer[T]] with RepAux[Value[T], Value[ArrayBuffer[T]], BufferAccumulator[T]] {
+    case class ValueRep[T](p: VParser[T], min: Int)
+      extends VParser[ArrayBuffer[T]] with RepParser[Value[T], Value[ArrayBuffer[T]], BufferAccumulator[T]] {
 
       override protected def newAccumulator = new BufferAccumulator
 
@@ -336,68 +414,142 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     }
 
     implicit val rep1 = new Rep[Matched]{
-      override type Out = MatchingParser
+      override type Out = MParser
 
       override def rep(p1: Parser[Matched], min: Int): Out = MatchingRep(p1, min)
     }
 
     implicit def rep2[T] = new Rep[Value[T]] {
-      override type Out = ValueParser[ArrayBuffer[T]]
+      override type Out = VParser[ArrayBuffer[T]]
 
-      override def rep(p1: Parser[Value[T]], min: Int): Out = ValueRep(p1, min)
+      override def rep(p1: VParser[T], min: Int): Out = ValueRep(p1, min)
     }
 
-//    def apply(p: MatchingParser, min: Int): MatchingParser = MatchingRep(p, min)
-//
-//    def apply[T](p: ValueParser[T], min: Int): ValueParser[ArrayBuffer[T]] =
-//      ValueRep(p, min)
   }
 
-  trait Or[Res <: ParsedValue] extends Parser[Res] {
-    def parsers: List[Parser[Res]]
 
-    override def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res] = {
-      var i: Int = 0
-      while (i < parsers.length) {
-        val res = parsers(i).parse(startIdx)
-        if (res.isSuccess) return res
-
-        i += 1
-      }
-      ParseFail(startIdx, startIdx, "No parser matches")
-    }
+  /**
+   * Or builder typeclass
+   */
+  trait Or[Res <: PValue] {
+    def or(p1: Parser[Res], p2: Parser[Res]): Or.OrParser[Res]
   }
 
   object Or {
-    case class MatchingOr(parsers: List[Parser[Matched]])
-      extends MatchingParser
-        with Or[Matched]
 
-    case class ValueOr[U](parsers: List[Parser[Value[_ <: U]]])
-      extends ValueParser[U]
-        with Or[Value[U]]
+    /**
+     * Given a list of parsers, tries to match them in order
+     */
+    case class OrParser[Res <: PValue](parsers: List[Parser[Res]]) extends Parser[Res] {
+      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Res] = {
+        var i: Int = 0
+        while (i < parsers.length) {
+          val res = parsers(i).parse(startIdx)
+          if (res.isSuccess) return res
 
-    def apply[Res <: ParsedValue, P <: Parser[Res]](
-                                                     p1: Parser[Res],
-                                                     p2: Parser[Res],
-                                                     f: List[Parser[Res]] => P): P = {
+          i += 1
+        }
+        PFail(startIdx, startIdx, "No parser matches")
+      }
+    }
+
+    /**
+     * Builds an OrParser, flattening the Ors as it goes, so that we don't get OrParser(a, OrParser(b, ...)))
+     * Possibly unnecessary
+     */
+    private def build[Res <: PValue](p1: Parser[Res], p2: Parser[Res]): OrParser[Res] = {
       def getParsers(p: Parser[Res]) = p match {
-        case o: Or[Res] => o.parsers
+        case o: OrParser[Res] => o.parsers
         case p => p :: Nil
       }
 
-      f(getParsers(p1) ::: getParsers(p2))
+      OrParser(getParsers(p1) ::: getParsers(p2))
     }
 
-    def apply(p1: MatchingParser, p2: MatchingParser): MatchingParser =
-      apply(p1, p2, MatchingOr)
+    /**
+     * Implicits for Or typeclass
+     */
+    implicit val or1: Or[Matched] = new Or[Matched] {
+      override def or(p1: Parser[Matched], p2: Parser[Matched]): OrParser[Matched] = build(p1, p2)
+    }
 
-    def apply[U, V1 <: U, V2 <: U](p1: ValueParser[V1],
-                                   p2: ValueParser[V2]): ValueParser[U] =
-      apply[Value[U], ValueParser[U]](
-        p1.asInstanceOf[Parser[Value[U]]],
-        p2.asInstanceOf[Parser[Value[U]]],
-        p => ValueOr[U](p))
+    implicit def or2[U]: Or[Value[U]] = new Or[Value[U]] {
+      override def or(p1: VParser[U], p2: VParser[U]): OrParser[Value[U]] = build[Value[U]](p1, p2)
+    }
+  }
+
+  /**
+   * Matches a sequence of Elem exactly
+   */
+  case class Exact(s: Repr) extends MParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MRes = {
+      val endIdx = startIdx + s.length
+      if (endIdx > seq.length)
+        PFail(startIdx, startIdx, s"$s is longer than remaining sequence")
+      else {
+        val maybeMatch = seq.slice(startIdx, endIdx)
+        if (maybeMatch == s) PSuccess(Matched(startIdx, endIdx))
+        else
+          PFail(startIdx,
+            startIdx,
+            s"Exact match failed: expected $s, got $maybeMatch")
+      }
+    }
+  }
+
+  /**
+   * Matches a single element by predicate
+   */
+  case class Single(pred: Elem => Boolean) extends MParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MRes = {
+      if (startIdx >= seq.length)
+        PFail(startIdx, startIdx, s"Index $startIdx out of bounds")
+      if (pred(seq(startIdx))) PSuccess(Matched(startIdx, startIdx + 1))
+      else
+        PFail(startIdx,
+          startIdx,
+          s"Predicate doesn't match ${seq(startIdx)}")
+    }
+  }
+
+  /**
+   * Matches while pred is true.
+   * Could probably just be replaced by Single(pred).rep()
+   */
+  case class While(pred: Elem => Boolean) extends MParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): MRes = {
+      var curIdx = startIdx
+      while (curIdx < seq.length && pred(seq(curIdx))) {
+        curIdx += 1
+      }
+      PSuccess(Matched(startIdx, curIdx))
+    }
+  }
+
+  /**
+   * Converts an MParser to a VParser that capture the result of the match in a subsequence
+   * In the most basic case, Repr = String, and the result is VParser[String]
+   */
+  case class Capture(p: Parser[Matched]) extends VParser[Repr] {
+    override def parse(startIdx: Int)(implicit seq: Repr): VRes[Repr] = {
+      p.parse(startIdx) match {
+        case PSuccess(Matched(start, end)) =>
+          val captured = seq.slice(start, end)
+          PSuccess(Value(captured, start, end))
+        case t: PFail => t
+      }
+    }
+  }
+
+  /**
+   * Some convenience methods on Repr
+   */
+  implicit class ReprOps(r: Repr) {
+    def length: Int = elemSeq.length(r)
+
+    def apply(idx: Int): Elem = elemSeq.apply(r, idx)
+
+    def slice(from: Int, until: Int): Repr = elemSeq.slice(r, from, until)
   }
 
 }
@@ -407,9 +559,6 @@ object ParserCtx {
     override def length(r: String): Int = r.length
 
     override def apply(r: String, idx: Int): Char = r.charAt(idx)
-
-    override def build(buffer: ArrayBuffer[Char]): String =
-      new String(buffer.toArray)
 
     override def slice(r: String, from: Int, until: Int): String =
       r.slice(from, until)
