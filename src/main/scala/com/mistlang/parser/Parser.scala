@@ -29,6 +29,8 @@ case class Value[+T](value: T, start: Int, end: Int) extends PValue
 sealed trait PResult[+Res <: PValue] {
   def isSuccess: Boolean
 
+  def get: Res
+
   def map[U <: PValue](f: Res => U): PResult[U]
 
   def flatMap[U <: PValue](f: Res => PResult[U]): PResult[U]
@@ -37,6 +39,8 @@ sealed trait PResult[+Res <: PValue] {
 case class PSuccess[Res <: PValue](res: Res) extends PResult[Res] {
   override def isSuccess: Boolean = true
 
+  override def get: Res = res
+
   override def map[U <: PValue](f: Res => U): PResult[U] = PSuccess(f(res))
 
   override def flatMap[U <: PValue](f: Res => PResult[U]): PResult[U] = f(res)
@@ -44,6 +48,8 @@ case class PSuccess[Res <: PValue](res: Res) extends PResult[Res] {
 
 case class PFail(startIdx: Int, curIdx: Int, message: String) extends PResult[Nothing] {
   override def isSuccess: Boolean = false
+
+  override def get: Nothing = throw new RuntimeException("Calling 'get' on a failed parse")
 
   override def map[U <: PValue](f: Nothing => U): PResult[U] = this
 
@@ -138,7 +144,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * @param or : an implicit OrParser builder
      */
     def |[U >: Val <: PValue, V <: U](other: Parser[V])(implicit or: Or[U]): Parser[U] =
-      or.or(this.asInstanceOf[Parser[U]], other.asInstanceOf[Parser[U]])
+      or.or(this, other)
 
     /**
      * Creates a parser that runs this repeatedly until failure or all input is consumed.
@@ -329,6 +335,10 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
    * If it succeeds, returns an accumulation of the parse results
    * If it fails to parse the min number of repetitions, returns an error
    *
+   * Currently if it encounters a parser that succeeds without consuming input, the Rep parser will result with 0
+   * repetitions. This is to avoid an infinite loop.
+   *
+   * TODO: maybe we need to distinguish between zero and non-zero consuming parsers at the type level?
    */
   trait Rep[T <: PValue] {
     type Out
@@ -379,12 +389,12 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
         while (curIdx < seq.length && {
           curMatch = p.parse(curIdx)
-          curMatch.isSuccess
+          curMatch.isSuccess &&
+            curMatch.get.end > curMatch.get.start // Make sure that we don't have an infinite loop
         }) {
           count += 1
-          val m = curMatch.asInstanceOf[PSuccess[In]]
-          curIdx = m.res.end
-          buffer.append(m.res)
+          curIdx = curMatch.get.end
+          buffer.append(curMatch.get)
         }
 
         if (count >= min) PSuccess(buildValue(buffer, startIdx, curIdx))
@@ -432,7 +442,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
    * Or builder typeclass
    */
   trait Or[Res <: PValue] {
-    def or(p1: Parser[Res], p2: Parser[Res]): Or.OrParser[Res]
+    def or(p1: Parser[_ <: Res], p2: Parser[_ <: Res]): Or.OrParser[Res]
   }
 
   object Or {
@@ -440,7 +450,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     /**
      * Given a list of parsers, tries to match them in order
      */
-    case class OrParser[Res <: PValue](parsers: List[Parser[Res]]) extends Parser[Res] {
+    case class OrParser[Res <: PValue](parsers: List[Parser[_ <: Res]]) extends Parser[Res] {
       override def parse(startIdx: Int)(implicit seq: Repr): PResult[Res] = {
         var i: Int = 0
         while (i < parsers.length) {
@@ -457,9 +467,9 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * Builds an OrParser, flattening the Ors as it goes, so that we don't get OrParser(a, OrParser(b, ...)))
      * Possibly unnecessary
      */
-    private def build[Res <: PValue](p1: Parser[Res], p2: Parser[Res]): OrParser[Res] = {
-      def getParsers(p: Parser[Res]) = p match {
-        case o: OrParser[Res] => o.parsers
+    private def build[Res <: PValue](p1: Parser[_ <: Res], p2: Parser[_ <: Res]): OrParser[Res] = {
+      def getParsers(p: Parser[_ <: Res]) = p match {
+        case o: OrParser[_] => o.parsers
         case p => p :: Nil
       }
 
@@ -470,11 +480,12 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * Implicits for Or typeclass
      */
     implicit val or1: Or[Matched] = new Or[Matched] {
-      override def or(p1: Parser[Matched], p2: Parser[Matched]): OrParser[Matched] = build(p1, p2)
+      override def or(p1: Parser[_ <: Matched], p2: Parser[_ <: Matched]): OrParser[Matched] = build(p1, p2)
     }
 
     implicit def or2[U]: Or[Value[U]] = new Or[Value[U]] {
-      override def or(p1: VParser[U], p2: VParser[U]): OrParser[Value[U]] = build[Value[U]](p1, p2)
+      override def or(p1: Parser[_ <: Value[U]], p2: Parser[_ <: Value[U]]): OrParser[Value[U]] =
+        build[Value[U]](p1, p2)
     }
   }
 
