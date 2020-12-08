@@ -39,27 +39,6 @@ sealed trait ParsedValue {
   def end: Int
 }
 
-trait ParsedValueTypeOps {
-  type AndMatched <: ParsedValue
-  type AndValue[T] <: ParsedValue
-  type Rep <: ParsedValue
-  type Opt <: ParsedValue
-}
-
-trait MatchedTypeOps extends ParsedValueTypeOps {
-  type AndMatched = Matched
-  type AndValue[T] = Value[T]
-  type Rep = Matched
-  type Opt = Matched
-}
-
-trait ValueTypeOps[T] extends ParsedValueTypeOps {
-  override type AndMatched = Value[T]
-  override type AndValue[U] = Value[(T, U)]
-  override type Rep = Value[ArrayBuffer[T]]
-  override type Opt = Value[Option[T]]
-}
-
 case class Matched(start: Int, end: Int) extends ParsedValue
 
 case class Value[+T](value: T, start: Int, end: Int) extends ParsedValue
@@ -83,18 +62,15 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     def slice(from: Int, until: Int): Repr = elemSeq.slice(r, from, until)
   }
 
-  trait Parser[+Res <: ParsedValue] {
-    type TypeOps <: ParsedValueTypeOps
+  trait Parser[Res <: ParsedValue] {
 
     def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res]
 
-    def ~(other: MatchingParser): Parser[TypeOps#AndMatched]
+    def ~[U <: ParsedValue](other: Parser[U])(implicit ander: Ander[Res, U]): ander.Out = ander.and(this, other)
 
-    def ~[T](other: ValueParser[T]): Parser[TypeOps#AndValue[T]]
+    def rep(min: Int = 0)(implicit r: Rep[Res]): r.Out = r.rep(this, min)
 
-    def rep(min: Int = 0): Parser[TypeOps#Rep]
-
-    def ? : Parser[TypeOps#Opt]
+    def ?(implicit optioner: Optioner[Res]): optioner.Out = optioner.opt(this)
 
     def run(startIdx: Int)(implicit seq: Repr): ParseResult[Res] = {
       parse(startIdx) match {
@@ -114,35 +90,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
     override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult
 
-    override type TypeOps = MatchedTypeOps
-
     def ! : ValueParser[Repr] = Capture(this)
-
-    def ? : MatchingParser = new MatchingParser {
-      override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult =
-        self.parse(startIdx) match {
-          case p: ParseSuccess[Matched] => p
-          case _: ParseFail => ParseSuccess(Matched(startIdx, startIdx))
-        }
-    }
-
-    def ~(other: MatchingParser): MatchingParser = new MatchingParser {
-      override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult =
-        for {
-          res1 <- self.parse(startIdx)
-          res2 <- other.parse(res1.end)
-        } yield Matched(res1.start, res2.end)
-    }
-
-    def ~[V](other: ValueParser[V]): ValueParser[V] = new ValueParser[V] {
-      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] =
-        for {
-          res1 <- self.parse(startIdx)
-          res2 <- other.parse(res1.end)
-        } yield Value(res2.value, res1.start, res2.end)
-    }
-
-    def rep(min: Int = 0): MatchingParser = Rep(this, min)
 
     def |(other: MatchingParser): MatchingParser = Or(this, other)
   }
@@ -150,41 +98,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
   trait ValueParser[T] extends Parser[Value[T]] {
     self =>
 
-    override type TypeOps = ValueTypeOps[T]
-
     override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T]
-
-    def ? : ValueParser[Option[T]] = new ValueParser[Option[T]] {
-      override def parse(startIdx: Int)(
-        implicit seq: Repr): ValueResult[Option[T]] =
-        self.parse(startIdx) match {
-          case ParseSuccess(Value(value, start, end)) =>
-            ParseSuccess(Value(Some(value), start, end))
-          case _: ParseFail => ParseSuccess(Value(None, startIdx, startIdx))
-        }
-    }
-
-    def ~(other: MatchingParser): ValueParser[T] = new ValueParser[T] {
-      override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[T] =
-        self.parse(startIdx).flatMap { res1 =>
-          other.parse(res1.end).map { res2 =>
-            Value(res1.value, res1.start, res2.end)
-          }
-        }
-    }
-
-    def ~[V](other: ValueParser[V]): ValueParser[(T, V)] =
-      new ValueParser[(T, V)] {
-        override def parse(startIdx: Int)(
-          implicit seq: Repr): ValueResult[(T, V)] =
-          self.parse(startIdx).flatMap { res1 =>
-            other.parse(res1.end).map { res2 =>
-              Value((res1.value, res2.value), res1.start, res2.end)
-            }
-          }
-      }
-
-    def rep(min: Int = 0): ValueParser[ArrayBuffer[T]] = Rep(this, min)
 
     def |[U >: T, V <: U](other: ValueParser[V]): ValueParser[U] =
       Or(this, other)
@@ -198,6 +112,99 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       override def parse(startIdx: Int)(implicit seq: Repr): ValueResult[V] =
         self.parse(startIdx).map(res => Value(f(res.value), res.start, res.end))
     }
+  }
+
+  trait Optioner[T <: ParsedValue] {
+    type Out
+
+    def opt(p1: Parser[T]): Out
+  }
+
+  object Optioner {
+    trait OptionerAux[V1 <: ParsedValue, T] extends Optioner[V1] {
+      override type Out = T
+    }
+
+    implicit val opt1 = new OptionerAux[Matched, MatchingParser] {
+      override def opt(p1: Parser[Matched]): MatchingParser = new MatchingParser {
+        override def parse(startIdx: Int)(implicit seq: Repr): MatchedResult =
+          p1.parse(startIdx) match {
+            case p: ParseSuccess[Matched] => p
+            case _: ParseFail => ParseSuccess(Matched(startIdx, startIdx))
+          }
+      }
+    }
+
+    implicit def opt2[T] = new OptionerAux[Value[T], ValueParser[Option[T]]] {
+
+      override def opt(p1: Parser[Value[T]]): Out = new ValueParser[Option[T]] {
+        override def parse(startIdx: Int)(
+          implicit seq: Repr): ValueResult[Option[T]] =
+          p1.parse(startIdx) match {
+            case ParseSuccess(Value(value, start, end)) =>
+              ParseSuccess(Value(Some(value), start, end))
+            case _: ParseFail => ParseSuccess(Value(None, startIdx, startIdx))
+          }
+      }
+    }
+  }
+
+
+  trait Ander[V1 <: ParsedValue, V2 <: ParsedValue] {
+    type Out
+
+    def and(p1: Parser[V1], p2: Parser[V2]): Out
+  }
+
+  object Ander {
+
+    class AnderAux[V1 <: ParsedValue, V2 <: ParsedValue, T](f: (Parser[V1], Parser[V2]) => T)
+      extends Ander[V1, V2] {
+
+      override type Out = T
+      override def and(p1: Parser[V1], p2: Parser[V2]): T = f(p1, p2)
+    }
+
+    implicit val and1 = new AnderAux[Matched, Matched, MatchingParser](And1)
+    implicit def and2[V1] = new AnderAux[Matched, Value[V1], ValueParser[V1]](And2(_, _))
+    implicit def and3[V1] = new AnderAux[Value[V1], Matched, ValueParser[V1]](And3(_, _))
+    implicit def and4[V1, V2] = new AnderAux[Value[V1], Value[V2], ValueParser[(V1, V2)]](And4(_, _))
+
+    trait And[V1 <: ParsedValue, V2 <: ParsedValue, Res <: ParsedValue] extends Parser[Res] {
+      def p1: Parser[V1]
+
+      def p2: Parser[V2]
+
+      def build(v1: V1, v2: V2): Res
+
+      override def parse(startIdx: Int)(implicit seq: Repr): ParseResult[Res] = {
+        for {
+          res1 <- p1.parse(startIdx)
+          res2 <- p2.parse(res1.end)
+        } yield build(res1, res2)
+      }
+    }
+
+    case class And1(p1: Parser[Matched], p2: Parser[Matched]) extends
+      And[Matched, Matched, Matched] with MatchingParser {
+      override def build(v1: Matched, v2: Matched): Matched = Matched(v1.start, v2.end)
+    }
+
+    case class And2[T](p1: Parser[Matched], p2: Parser[Value[T]])
+      extends And[Matched, Value[T], Value[T]] with ValueParser[T] {
+      override def build(v1: Matched, v2: Value[T]): Value[T] = Value(v2.value, v1.start, v2.end)
+    }
+
+    case class And3[T](p1: Parser[Value[T]], p2: Parser[Matched]) extends
+      And[Value[T], Matched, Value[T]] with ValueParser[T] {
+      override def build(v1: Value[T], v2: Matched): Value[T] = Value(v1.value, v1.start, v2.end)
+    }
+
+    case class And4[T, U](p1: Parser[Value[T]], p2: Parser[Value[U]]) extends
+      And[Value[T], Value[U], Value[(T, U)]] with ValueParser[(T, U)] {
+      override def build(v1: Value[T], v2: Value[U]): Value[(T, U)] = Value(v1.value -> v2.value, v1.start, v2.end)
+    }
+
   }
 
   case class Exact(s: Repr) extends MatchingParser {
@@ -252,7 +259,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     }
   }
 
-  trait Rep[In <: ParsedValue, Out <: ParsedValue, Acc <: Rep.Accumulator[In]] extends Parser[Out] {
+  trait RepAux[In <: ParsedValue, Out <: ParsedValue, Acc <: Rep.Accumulator[In]] extends Parser[Out] {
     def p: Parser[In]
 
     def min: Int
@@ -284,6 +291,12 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     }
   }
 
+  trait Rep[T <: ParsedValue] {
+    type Out
+
+    def rep(p1: Parser[T], min: Int): Out
+  }
+
   object Rep {
     trait Accumulator[In] {
       def append(r: In): Unit
@@ -301,8 +314,8 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    case class MatchingRep(p: MatchingParser, min: Int) extends MatchingParser with
-      Rep[Matched, Matched, UnitAccumulator.type] {
+    case class MatchingRep(p: Parser[Matched], min: Int) extends MatchingParser with
+      RepAux[Matched, Matched, UnitAccumulator.type] {
 
       override protected def newAccumulator: UnitAccumulator = UnitAccumulator
 
@@ -310,8 +323,8 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
         Matched(start, end)
     }
 
-    case class ValueRep[T](p: ValueParser[T], min: Int)
-      extends ValueParser[ArrayBuffer[T]] with Rep[Value[T], Value[ArrayBuffer[T]], BufferAccumulator[T]] {
+    case class ValueRep[T](p: Parser[Value[T]], min: Int)
+      extends ValueParser[ArrayBuffer[T]] with RepAux[Value[T], Value[ArrayBuffer[T]], BufferAccumulator[T]] {
 
       override protected def newAccumulator = new BufferAccumulator
 
@@ -322,10 +335,22 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    def apply(p: MatchingParser, min: Int): MatchingParser = MatchingRep(p, min)
+    implicit val rep1 = new Rep[Matched]{
+      override type Out = MatchingParser
 
-    def apply[T](p: ValueParser[T], min: Int): ValueParser[ArrayBuffer[T]] =
-      ValueRep(p, min)
+      override def rep(p1: Parser[Matched], min: Int): Out = MatchingRep(p1, min)
+    }
+
+    implicit def rep2[T] = new Rep[Value[T]] {
+      override type Out = ValueParser[ArrayBuffer[T]]
+
+      override def rep(p1: Parser[Value[T]], min: Int): Out = ValueRep(p1, min)
+    }
+
+//    def apply(p: MatchingParser, min: Int): MatchingParser = MatchingRep(p, min)
+//
+//    def apply[T](p: ValueParser[T], min: Int): ValueParser[ArrayBuffer[T]] =
+//      ValueRep(p, min)
   }
 
   trait Or[Res <: ParsedValue] extends Parser[Res] {
@@ -369,7 +394,10 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
     def apply[U, V1 <: U, V2 <: U](p1: ValueParser[V1],
                                    p2: ValueParser[V2]): ValueParser[U] =
-      apply[Value[U], ValueParser[U]](p1, p2, p => ValueOr[U](p))
+      apply[Value[U], ValueParser[U]](
+        p1.asInstanceOf[Parser[Value[U]]],
+        p2.asInstanceOf[Parser[Value[U]]],
+        p => ValueOr[U](p))
   }
 
 }
