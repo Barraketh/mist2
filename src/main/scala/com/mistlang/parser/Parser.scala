@@ -58,6 +58,7 @@ case class PFail(startIdx: Int, curIdx: Int, message: String) extends PResult[No
 
 /**
  * Operations on sequence of type Repr
+ *
  * @tparam Elem : Underlying element of the sequence
  * @tparam Repr : Type of the sequence
  */
@@ -106,8 +107,8 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * PFAil indicates a parse failure and does not consume any input.
      *
      * @param startIdx : Index in the seq where to start parsing
-     * @param seq : The sequence to parse.
-     *            // TODO: Should this be part of the ParseContext?
+     * @param seq      : The sequence to parse.
+     *                 // TODO: Should this be part of the ParseContext?
      * @return PResult
      */
     def parse(startIdx: Int)(implicit seq: Repr): PResult[Val]
@@ -132,7 +133,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      *
      * @param and : an implicit AndParser builder. And.Out lets us encode the algebra of combining values
      */
-    def ~[U <: PValue](other: Parser[U])(implicit and: And[Val, U]): and.Out = and.and(this, other)
+    def ~[U <: PValue](other: Parser[U])(implicit and: And[Val, U]): Parser[and.Out] = and.and(this, other)
 
     /**
      * Creates a parser that runs this, and if unsuccessful then will try other, and will return success if
@@ -167,7 +168,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      *
      * See OptParser for more information
      */
-    def ?(implicit opt: Opt[Val]): opt.Out = opt.opt(this)
+    def ?(implicit opt: Opt[Val]): Parser[opt.Out] = opt.opt(this)
 
   }
 
@@ -205,17 +206,17 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
    * In both cases, on failure end = startIdx, so no input is consumed
    */
   trait Opt[T <: PValue] {
-    type Out
+    type Out <: PValue
 
-    def opt(p1: Parser[T]): Out
+    def opt(p1: Parser[T]): Parser[Out]
   }
 
   object Opt {
     /**
      * Implementation of the OptParser
      *
-     * @param p : Underlying parser
-     * @param f : Maps the successfully parsed value. Enables the Value[T] -> Value[ Option[T] ] mapping
+     * @param p       : Underlying parser
+     * @param f       : Maps the successfully parsed value. Enables the Value[T] -> Value[ Option[T] ] mapping
      * @param default : Since we return ParseSuccess on failure, need a default parsed value
      */
     class OptParser[In <: PValue, Out <: PValue](p: Parser[In], f: In => Out, default: Int => Out)
@@ -233,22 +234,16 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * Concrete implementations & implicits for the type class
      */
 
-    trait OptAux[V1 <: PValue, T] extends Opt[V1] {
+    class OptAux[V1 <: PValue, T <: PValue](f: V1 => T, default: Int => T) extends Opt[V1] {
       override type Out = T
+
+      override def opt(p1: Parser[V1]): Parser[T] = new OptParser[V1, T](p1, f, default)
     }
 
-    implicit val opt1: OptAux[Matched, MParser] = new OptAux[Matched, MParser] {
-      override def opt(p1: Parser[Matched]): MParser =
-        new OptParser[Matched, Matched](p1, res => res, idx => Matched(idx, idx))
-    }
+    implicit val opt1: OptAux[Matched, Matched] = new OptAux(res => res, idx => Matched(idx, idx))
 
-    implicit def opt2[T]: OptAux[Value[T], VParser[Option[T]]] =
-      new OptAux[Value[T], VParser[Option[T]]] {
-
-      override def opt(p1: Parser[Value[T]]): Out = new OptParser[Value[T], Value[Option[T]]](
-        p1, res => res.copy(value = Some(res.value)), idx => Value(None,idx, idx)
-      )
-    }
+    implicit def opt2[T]: OptAux[Value[T], Value[Option[T]]] =
+      new OptAux(res => res.copy(value = Some(res.value)), idx => Value(None, idx, idx))
   }
 
 
@@ -256,16 +251,16 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
    * Typeclass for building AndParser(p1, p2)
    *
    * An AndParser runs p1 and then runs p2 with the following conceptual algebra:
-   *   And[ Matched, Matched ] => Matched
-   *   And[ Matched, Value[T] ] => Value[T]
-   *   And[ Value[T], Matched ] => Value[T]
-   *   And[ Value[T], Value[U] ] => Value[T, U]
+   * And[ Matched, Matched ] => Matched
+   * And[ Matched, Value[T] ] => Value[T]
+   * And[ Value[T], Matched ] => Value[T]
+   * And[ Value[T], Value[U] ] => Value[T, U]
    *
    */
   trait And[V1 <: PValue, V2 <: PValue] {
-    type Out
+    type Out <: PValue
 
-    def and(p1: Parser[V1], p2: Parser[V2]): Out
+    def and(p1: Parser[V1], p2: Parser[V2]): Parser[Out]
   }
 
   object And {
@@ -273,17 +268,13 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     /**
      * AndParser implementation
      * Runs p1, and then p2
+     *
+     * @param build : Combines two successful results of p1 and p2 into single result.
+     *              This is what actually implements our algebra
      */
-    trait AndParser[V1 <: PValue, V2 <: PValue, Res <: PValue] extends Parser[Res] {
-      def p1: Parser[V1]
-      def p2: Parser[V2]
-
-      /**
-       * Combines two successful results of p1 and p2 into single result.
-       * This is what actually implements our algebra
-       */
-      def build(v1: V1, v2: V2): Res
-
+    class AndParser[V1 <: PValue, V2 <: PValue, Res <: PValue](p1: Parser[V1],
+                                                               p2: Parser[V2],
+                                                               build: (V1, V2) => Res) extends Parser[Res] {
       override def parse(startIdx: Int)(implicit seq: Repr): PResult[Res] = {
         for {
           res1 <- p1.parse(startIdx)
@@ -296,36 +287,22 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * Specific instances & implicits for the typeclass
      */
 
-    class AndAux[V1 <: PValue, V2 <: PValue, T](f: (Parser[V1], Parser[V2]) => T) extends And[V1, V2] {
+    class AndAux[V1 <: PValue, V2 <: PValue, T <: PValue](f: (V1, V2) => T) extends And[V1, V2] {
       override type Out = T
-      override def and(p1: Parser[V1], p2: Parser[V2]): T = f(p1, p2)
+
+      override def and(p1: Parser[V1], p2: Parser[V2]): Parser[T] = new AndParser[V1, V2, T](p1, p2, f)
     }
 
-    implicit val and1 = new AndAux[Matched, Matched, MParser](And1)
-    implicit def and2[V1] = new AndAux[Matched, Value[V1], VParser[V1]](And2(_, _))
-    implicit def and3[V1] = new AndAux[Value[V1], Matched, VParser[V1]](And3(_, _))
-    implicit def and4[V1, V2] = new AndAux[Value[V1], Value[V2], VParser[(V1, V2)]](And4(_, _))
+    implicit val and1: AndAux[Matched, Matched, Matched] = new AndAux((v1, v2) => Matched(v1.start, v2.end))
 
-    case class And1(p1: Parser[Matched], p2: Parser[Matched]) extends
-      AndParser[Matched, Matched, Matched] with MParser {
-      override def build(v1: Matched, v2: Matched): Matched = Matched(v1.start, v2.end)
-    }
+    implicit def and2[V1]: AndAux[Matched, Value[V1], Value[V1]] =
+      new AndAux((v1, v2) => Value(v2.value, v1.start, v2.end))
 
-    case class And2[T](p1: Parser[Matched], p2: VParser[T])
-      extends AndParser[Matched, Value[T], Value[T]] with VParser[T] {
-      override def build(v1: Matched, v2: Value[T]): Value[T] = Value(v2.value, v1.start, v2.end)
-    }
+    implicit def and3[V1]: AndAux[Value[V1], Matched, Value[V1]] =
+      new AndAux((v1, v2) => Value(v1.value, v1.start, v2.end))
 
-    case class And3[T](p1: VParser[T], p2: Parser[Matched]) extends
-      AndParser[Value[T], Matched, Value[T]] with VParser[T] {
-      override def build(v1: Value[T], v2: Matched): Value[T] = Value(v1.value, v1.start, v2.end)
-    }
-
-    case class And4[T, U](p1: VParser[T], p2: VParser[U]) extends
-      AndParser[Value[T], Value[U], Value[(T, U)]] with VParser[(T, U)] {
-      override def build(v1: Value[T], v2: Value[U]): Value[(T, U)] = Value(v1.value -> v2.value, v1.start, v2.end)
-    }
-
+    implicit def and4[V1, V2]: AndAux[Value[V1], Value[V2], Value[(V1, V2)]] =
+      new AndAux((v1, v2) => Value(v1.value -> v2.value, v1.start, v2.end))
   }
 
   /**
@@ -367,7 +344,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
     /**
      * RepParser implementation
      *
-     * @tparam In : Type of input parser value
+     * @tparam In  : Type of input parser value
      * @tparam Out : Type of accumulated value
      * @tparam Acc : Type of accumulator
      */
@@ -423,7 +400,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    implicit val rep1 = new Rep[Matched]{
+    implicit val rep1 = new Rep[Matched] {
       override type Out = MParser
 
       override def rep(p1: Parser[Matched], min: Int): Out = MatchingRep(p1, min)
