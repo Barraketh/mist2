@@ -324,43 +324,49 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
   }
 
   object Rep {
-    trait Accumulator[In] {
+    trait Accumulator[In <: PValue] {
+      type Out <: PValue
+
       def append(r: In): Unit
+
+      def get(start: Int, end: Int): Out
     }
 
-    object UnitAccumulator extends Accumulator[Matched] {
+    object MatchedAccumulator extends Accumulator[Matched] {
+      type Out = Matched
+
       override def append(r: Matched): Unit = ()
-    }
-    type UnitAccumulator = UnitAccumulator.type
 
-    class BufferAccumulator[T] extends Accumulator[Value[T]] {
+      override def get(start: Int, end: Int): Matched = Matched(start, end)
+    }
+    type MatchedAccumulator = MatchedAccumulator.type
+
+    class ValueAccumulator[T] extends Accumulator[Value[T]] {
+      type Out = Value[ArrayBuffer[T]]
+
       val buffer = new ArrayBuffer[T]()
 
       override def append(r: Value[T]): Unit = {
         buffer += r.value
       }
+
+      override def get(start: Int, end: Int): Value[ArrayBuffer[T]] = Value(buffer, start, end)
     }
 
     /**
      * RepParser implementation
      *
      * @tparam In  : Type of input parser value
-     * @tparam Out : Type of accumulated value
      * @tparam Acc : Type of accumulator
      */
-    trait RepParser[In <: PValue, Out <: PValue, Acc <: Rep.Accumulator[In]] extends Parser[Out] {
-      def p: Parser[In]
-
-      def min: Int
-
-      protected def newAccumulator: Acc
-
-      protected def buildValue(accumulator: Acc, start: Int, end: Int): Out
-
-      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Out] = {
+    class RepParser[
+      In <: PValue,
+      Acc <: Rep.Accumulator[In]
+    ](p: Parser[In], min: Int, newAcc: () => Acc) extends Parser[Acc#Out] {
+      override def parse(startIdx: Int)(implicit seq: Repr): PResult[Acc#Out] = {
         var curIdx = startIdx
         var count = 0
-        val buffer = newAccumulator
+        val buffer = newAcc()
 
         var curMatch: PResult[In] = null
 
@@ -374,44 +380,24 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
           buffer.append(curMatch.get)
         }
 
-        if (count >= min) PSuccess(buildValue(buffer, startIdx, curIdx))
+        if (count >= min) PSuccess(buffer.get(startIdx, curIdx))
         else PFail(startIdx, curIdx, s"Expected at least $min repetitions, found $count")
       }
     }
 
-    case class MatchingRep(p: Parser[Matched], min: Int) extends MParser with
-      RepParser[Matched, Matched, UnitAccumulator.type] {
-
-      override protected def newAccumulator: UnitAccumulator = UnitAccumulator
-
-      override protected def buildValue(accumulator: UnitAccumulator, start: Int, end: Int): Matched =
-        Matched(start, end)
-    }
-
-    case class ValueRep[T](p: VParser[T], min: Int)
-      extends VParser[ArrayBuffer[T]] with RepParser[Value[T], Value[ArrayBuffer[T]], BufferAccumulator[T]] {
-
-      override protected def newAccumulator = new BufferAccumulator
-
-      override protected def buildValue(accumulator: BufferAccumulator[T],
-                                        start: Int,
-                                        end: Int): Value[ArrayBuffer[T]] = {
-        Value(accumulator.buffer, start, end)
-      }
-    }
-
-    implicit val rep1 = new Rep[Matched] {
+    implicit val rep1: Rep[Matched] = new Rep[Matched] {
       override type Out = MParser
 
-      override def rep(p1: Parser[Matched], min: Int): Out = MatchingRep(p1, min)
+      override def rep(p1: Parser[Matched], min: Int): Out =
+        new RepParser[Matched, MatchedAccumulator](p1, min, () => MatchedAccumulator)
     }
 
-    implicit def rep2[T] = new Rep[Value[T]] {
+    implicit def rep2[T]: Rep[Value[T]] = new Rep[Value[T]] {
       override type Out = VParser[ArrayBuffer[T]]
 
-      override def rep(p1: VParser[T], min: Int): Out = ValueRep(p1, min)
+      override def rep(p1: VParser[T], min: Int): Out =
+        new RepParser[Value[T], ValueAccumulator[T]](p1, min, () => new ValueAccumulator[T])
     }
-
   }
 
 
