@@ -129,11 +129,11 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
     /**
      * Creates parser that runs this, and then other, and captures the results of both if both are successful
-     * See AndParser for more information
+     * See SequenceParser for more information
      *
-     * @param and : an implicit AndParser builder. And.Out lets us encode the algebra of combining values
+     * @param s : an implicit SequenceParser builder. And.Out lets us encode the algebra of combining values
      */
-    def ~[U <: PValue](other: Parser[U])(implicit and: And[Val, U]): Parser[and.Out] = and.and(this, other)
+    def ~[U <: PValue](other: Parser[U])(implicit s: Sequencer[Val, U]): Parser[s.Out] = s.andThen(this, other)
 
     /**
      * Creates a parser that runs this, and if unsuccessful then will try other, and will return success if
@@ -155,7 +155,7 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      *
      * See RepParser for more information
      */
-    def rep(min: Int = 0)(implicit r: Rep[Val]): r.Out = r.rep(this, min)
+    def rep(min: Int = 0)(implicit r: Rep[Val]): Parser[r.Out] = r.rep(this, min)
 
 
     /**
@@ -248,33 +248,33 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
 
 
   /**
-   * Typeclass for building AndParser(p1, p2)
+   * Typeclass for building SequenceParser(p1, p2)
    *
-   * An AndParser runs p1 and then runs p2 with the following conceptual algebra:
+   * An SequenceParser runs p1 and then runs p2 with the following conceptual algebra:
    * And[ Matched, Matched ] => Matched
    * And[ Matched, Value[T] ] => Value[T]
    * And[ Value[T], Matched ] => Value[T]
    * And[ Value[T], Value[U] ] => Value[T, U]
    *
    */
-  trait And[V1 <: PValue, V2 <: PValue] {
+  trait Sequencer[V1 <: PValue, V2 <: PValue] {
     type Out <: PValue
 
-    def and(p1: Parser[V1], p2: Parser[V2]): Parser[Out]
+    def andThen(p1: Parser[V1], p2: Parser[V2]): Parser[Out]
   }
 
-  object And {
+  object Sequencer {
 
     /**
-     * AndParser implementation
+     * SequenceParser implementation
      * Runs p1, and then p2
      *
      * @param build : Combines two successful results of p1 and p2 into single result.
      *              This is what actually implements our algebra
      */
-    class AndParser[V1 <: PValue, V2 <: PValue, Res <: PValue](p1: Parser[V1],
-                                                               p2: Parser[V2],
-                                                               build: (V1, V2) => Res) extends Parser[Res] {
+    class SequenceParser[V1 <: PValue, V2 <: PValue, Res <: PValue](p1: Parser[V1],
+                                                                    p2: Parser[V2],
+                                                                    build: (V1, V2) => Res) extends Parser[Res] {
       override def parse(startIdx: Int)(implicit seq: Repr): PResult[Res] = {
         for {
           res1 <- p1.parse(startIdx)
@@ -287,22 +287,22 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      * Specific instances & implicits for the typeclass
      */
 
-    class AndAux[V1 <: PValue, V2 <: PValue, T <: PValue](f: (V1, V2) => T) extends And[V1, V2] {
+    class SequencerAux[V1 <: PValue, V2 <: PValue, T <: PValue](f: (V1, V2) => T) extends Sequencer[V1, V2] {
       override type Out = T
 
-      override def and(p1: Parser[V1], p2: Parser[V2]): Parser[T] = new AndParser[V1, V2, T](p1, p2, f)
+      override def andThen(p1: Parser[V1], p2: Parser[V2]): Parser[T] = new SequenceParser[V1, V2, T](p1, p2, f)
     }
 
-    implicit val and1: AndAux[Matched, Matched, Matched] = new AndAux((v1, v2) => Matched(v1.start, v2.end))
+    implicit val and1: SequencerAux[Matched, Matched, Matched] = new SequencerAux((v1, v2) => Matched(v1.start, v2.end))
 
-    implicit def and2[V1]: AndAux[Matched, Value[V1], Value[V1]] =
-      new AndAux((v1, v2) => Value(v2.value, v1.start, v2.end))
+    implicit def and2[V1]: SequencerAux[Matched, Value[V1], Value[V1]] =
+      new SequencerAux((v1, v2) => Value(v2.value, v1.start, v2.end))
 
-    implicit def and3[V1]: AndAux[Value[V1], Matched, Value[V1]] =
-      new AndAux((v1, v2) => Value(v1.value, v1.start, v2.end))
+    implicit def and3[V1]: SequencerAux[Value[V1], Matched, Value[V1]] =
+      new SequencerAux((v1, v2) => Value(v1.value, v1.start, v2.end))
 
-    implicit def and4[V1, V2]: AndAux[Value[V1], Value[V2], Value[(V1, V2)]] =
-      new AndAux((v1, v2) => Value(v1.value -> v2.value, v1.start, v2.end))
+    implicit def and4[V1, V2]: SequencerAux[Value[V1], Value[V2], Value[(V1, V2)]] =
+      new SequencerAux((v1, v2) => Value(v1.value -> v2.value, v1.start, v2.end))
   }
 
   /**
@@ -318,12 +318,16 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
    * TODO: maybe we need to distinguish between zero and non-zero consuming parsers at the type level?
    */
   trait Rep[T <: PValue] {
-    type Out
+    type Out <: PValue
 
-    def rep(p1: Parser[T], min: Int): Out
+    def rep(p1: Parser[T], min: Int): Parser[Out]
   }
 
   object Rep {
+    trait RepAux[In <: PValue, O <: PValue] extends Rep[In] {
+      override type Out = O
+    }
+
     trait Accumulator[In <: PValue] {
       type Out <: PValue
 
@@ -385,17 +389,13 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
 
-    implicit val rep1: Rep[Matched] = new Rep[Matched] {
-      override type Out = MParser
-
-      override def rep(p1: Parser[Matched], min: Int): Out =
+    implicit val rep1: RepAux[Matched, Matched] = new RepAux[Matched, Matched] {
+      override def rep(p1: Parser[Matched], min: Int): Parser[Out] =
         new RepParser[Matched, MatchedAccumulator](p1, min, () => MatchedAccumulator)
     }
 
-    implicit def rep2[T]: Rep[Value[T]] = new Rep[Value[T]] {
-      override type Out = VParser[ArrayBuffer[T]]
-
-      override def rep(p1: VParser[T], min: Int): Out =
+    implicit def rep2[T]: RepAux[Value[T], Value[ArrayBuffer[T]]] = new RepAux[Value[T], Value[ArrayBuffer[T]]] {
+      override def rep(p1: VParser[T], min: Int): Parser[Out] =
         new RepParser[Value[T], ValueAccumulator[T]](p1, min, () => new ValueAccumulator[T])
     }
   }
