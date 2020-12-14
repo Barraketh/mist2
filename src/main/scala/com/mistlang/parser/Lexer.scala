@@ -61,11 +61,11 @@ class Lexer {
 
     val whitespace = CharIn(" \t")
 
-    (whitespace.rep() ~ token).rep() ~ whitespace.rep()
+    (whitespace.rep() ~ token).rep() ~ whitespace.rep() ~ End
   }
 
   def lex(s: String): ArrayBuffer[Token] = {
-    lexGrammar.run(0)(s) match {
+    lexGrammar.parse(s) match {
       case PSuccess(res) => res.value
       case p: PFail => throw new RuntimeException(p.toString)
     }

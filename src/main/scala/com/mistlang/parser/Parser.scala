@@ -113,25 +113,13 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
      */
     def parse(startIdx: Int)(implicit seq: Repr): PResult[Val]
 
-    /**
-     * Parse and then check if the result has consumed the entire sequence.
-     */
-    def run(startIdx: Int)(implicit seq: Repr): PResult[Val] = {
-      parse(startIdx) match {
-        case p@PSuccess(res) if res.end == seq.length => p
-        case p: PSuccess[Val] =>
-          PFail(startIdx,
-            p.res.end,
-            s"Failed to consume input starting at ${p.res.end}")
-        case p: PFail => p
-      }
-    }
+    def parse(seq: Repr): PResult[Val] = parse(0)(seq)
 
     /**
      * Creates parser that runs this, and then other, and captures the results of both if both are successful
      * See SequenceParser for more information
      *
-     * @param s : an implicit SequenceParser builder. And.Out lets us encode the algebra of combining values
+     * @param s : an implicit SequenceParser builder. Sequencer.Out lets us encode the algebra of combining values
      */
     def ~[U <: PValue](other: Parser[U])(implicit s: Sequencer[Val, U]): Parser[s.Out] = s.andThen(this, other)
 
@@ -497,6 +485,13 @@ class ParserContext[Elem, Repr](implicit elemSeq: ElemSeq[Elem, Repr]) {
         curIdx += 1
       }
       PSuccess(Matched(startIdx, curIdx))
+    }
+  }
+
+  case object End extends MParser {
+    override def parse(startIdx: Int)(implicit seq: Repr): PResult[Matched] = {
+      if (startIdx == seq.length) PSuccess(Matched(startIdx, startIdx))
+      else PFail(startIdx, startIdx, s"Index $startIdx does not match end of sequence of length ${seq.length}")
     }
   }
 
