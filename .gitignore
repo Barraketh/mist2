@@ -26,3 +26,11 @@ file_system
 # Ensime files
 .ensime
 .ensime_cache/
+
+.bloop
+.bsp
+.metals
+.vscode
+
+project/project
+project/metals.sbt
