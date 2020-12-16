@@ -1,4 +1,4 @@
-package com.mistlang.parser
+package com.mistlang.peg
 
 import ParserCtx._
 import StringCtx._

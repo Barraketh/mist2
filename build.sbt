@@ -1,7 +1,7 @@
-lazy val root = project
-  .in(file("."))
+lazy val peg = project
+  .in(file("peg"))
   .settings(
-    name := "mist2",
+    name := "peg",
     version := "0.1.0",
 
     scalaVersion := "2.13.4",

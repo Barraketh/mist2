@@ -1,6 +1,6 @@
-package com.mistlang.parser
+package com.mistlang.peg
 
-import com.mistlang.parser.ParserCtx._
+import ParserCtx._
 import org.scalatest.{FunSuite, Matchers}
 
 
