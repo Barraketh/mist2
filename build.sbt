@@ -25,3 +25,23 @@ lazy val peg = project
     ),
 
   )
+
+lazy val pegDotty = project
+  .in(file("peg-dotty"))
+  .settings(
+    name := "peg-dotty",
+    version := "0.1.0",
+
+    scalaVersion := "3.0.0-M2",
+    scalacOptions ++= Seq(
+      "-deprecation",
+      "-encoding",
+      "UTF-8",
+      "-feature",
+      "-unchecked",
+      "-Xfatal-warnings",
+      "-language:higherKinds",
+      "-language:implicitConversions"
+    ),
+
+  )
