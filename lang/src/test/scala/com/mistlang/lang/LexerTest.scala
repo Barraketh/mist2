@@ -1,16 +1,18 @@
 package com.mistlang.peg
 
-import org.scalatest.{FunSuite, Matchers}
+import org.junit.Test
+import org.junit.Assert._
+import TokenV._
 
 import scala.collection.mutable.ArrayBuffer
 
-class LexerTest extends FunSuite with Matchers {
+class LexerTest {
 
-  import TokenV._
+  @Test
+  def test(): Unit = {
 
-
-  test("Successfully lex a simple function ") {
     val lexer = new Lexer
+
     val s =
       """
         |val  s =   {
@@ -22,12 +24,12 @@ class LexerTest extends FunSuite with Matchers {
         |""".stripMargin
 
     val expected = ArrayBuffer[TokenV](`\n`, Ident("val"), Ident("s"), `=`, `{`, `\n`,
-      Ident("if"), `(`, Number("4"), `-`, Number("5", positive =  false), EqEq, `=`, Number("3", Some("5")),
+      Ident("if"), `(`, Number("4"), minus, Number("5", positive =  false), EqEq, `=`, Number("3", Some("5")),
       `||`, Ident("true"), `)`, `{`, `\n`,
       Ident("myFunc"), `(`, Ident("foo"), `,`, Ident("bar"), `,`, StringToken("blammo"), `)`, `.`,
       Ident("baz"), `\n`, `}`, `\n`, `\n`,`}`, `\n`)
 
     val res: ArrayBuffer[TokenV] = lexer.lex(s).map(_.value)
-    res shouldEqual expected
+    assert(res == expected)
   }
 }
