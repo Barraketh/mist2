@@ -38,7 +38,7 @@ class Lexer {
     }
 
     // TODO: Add escape sequences
-    val string = ("\"" ~ Single(c => c != '\n' && c != '"').rep().! ~ "\"").map(s => StringToken(s))
+    val string = ("\"" ~ While(c => c != '\n' && c != '"').! ~ "\"").map(s => StringToken(s))
 
     val digit = CharIn('0' -> '9')
 
@@ -59,9 +59,13 @@ class Lexer {
     val token = (number | simpleToken | string | ident)
       .mapValue(res => Value(Token(res.value, res.pos), res.pos))
 
+    val comment = "//" ~ While(c => c != '\n')
+
     val whitespace = CharIn(" \t")
 
-    (whitespace.rep() ~ token).rep() ~ whitespace.rep() ~ End
+    val ignore = whitespace | comment
+
+    (ignore.rep() ~ token).rep() ~ ignore.rep() ~ End
   }
 
   def lex(s: String): ArrayBuffer[Token] = {

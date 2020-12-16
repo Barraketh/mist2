@@ -15,8 +15,8 @@ class LexerTest {
 
     val s =
       """
-        |val  s =   {
-        |if (4--5=== 3.5 || true) {
+        |val  s =   { // Foo
+        |if (4--5=== 3.5 || true) {// Bar
         |  myFunc(foo, bar, "blammo").baz
         |}
         |

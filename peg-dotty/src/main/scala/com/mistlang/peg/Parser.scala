@@ -115,6 +115,8 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
     }
   }
 
+  def While(pred: Elem => Boolean) = Single(pred).rep()
+
   /**
    * Combinators
    */
