@@ -36,6 +36,8 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
     def apply(idx: Int): Elem = elemSeq.apply(r, idx)
 
     def slice(start: Int, end: Int) = elemSeq.slice(r, start, end)
+
+    def length = elemSeq.length(r)
   }
 
   trait Parser[A <: PValue] {
@@ -45,7 +47,9 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
     
     def |[B <: PValue](other: Parser[B]): Parser[(A | B)] = new Or.OrParser(this, other)
 
-    protected def fail(startIdx: Int, curIdx: Int) = Left(PFail(startIdx, curIdx, s"$this failed at $curIdx"))
+    def ?(using default: Opt.Default[A] ) : Parser[Opt.Out[A]] = new Opt.OptParser(this, default)
+
+    protected def fail(startIdx: Int, curIdx: Int) = Left(PFail(startIdx, curIdx, s"$this"))
   }
 
   object Parser {
@@ -65,6 +69,19 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
     override def parse(startIdx: Int)(using seq: Repr): PResult[Matched] = {
       if (seq(startIdx) == e) this.succeed(startIdx, startIdx)
       else fail(startIdx, startIdx)
+    }
+  }
+
+  // Matches a sequence against a given position
+  case class ExactSeq(s: Repr) extends Parser[Matched] {
+    override def parse(startIdx: Int)(using seq: Repr): PResult[Matched] = {
+      val endIdx = startIdx + s.length
+      if (endIdx > seq.length) fail(startIdx, startIdx)
+      else {
+        val maybeMatch = seq.slice(startIdx, endIdx)
+        if (maybeMatch == s) this.succeed(startIdx, endIdx)
+        else fail(startIdx, startIdx)
+      }
     }
   }
 
@@ -143,10 +160,71 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
       }
     }
   }
+
+  // Represents p1.? -> will run p1.  If p1 fails will succeed without consuming any input
+  object Opt {      
+    type Out[A <: PValue] <: PValue = A match {
+      case Matched => Matched
+      case Value[t] => Value[Option[t]]
+    }
+
+    def opt[A <: PValue](a: A): Out[A] = a match {
+      case m: Matched => m
+      case v: Value[t] => Value(Some(v.value), v.pos)
+    }
+
+    trait Default[A <: PValue] {
+      def default(pos: Pos): Out[A]
+    }
+
+    object Default {
+      given Default[Matched] = pos => Matched(pos)
+      given [T] as Default[Value[T]] = pos => Value(None, pos)
+    }
+
+    case class OptParser[A <: PValue](p: Parser[A], d: Default[A]) extends Parser[Out[A]] {
+      override def parse(startIdx: Int)(using seq: Repr): PResult[Out[A]] = {
+        p.parse(startIdx)
+          .map(a => opt(a))
+          .orElse(Right(d.default(Pos(startIdx, startIdx))))
+      }
+    }
+
+  }
 }
 
 
+object ParserCtx {
+  val StrSeq: ElemSeq[Char, String] = new ElemSeq[Char, String] {
+    override def length(r: String): Int = r.length
 
+    override def apply(r: String, idx: Int): Char = r.charAt(idx)
+
+    override def slice(r: String, from: Int, until: Int): String =
+      r.slice(from, until)
+  }
+
+  object StringCtx extends ParserContext[Char, String](StrSeq)
+
+  implicit def strToParser(s: String): StringCtx.ExactSeq = StringCtx.ExactSeq(s)
+  extension (s: String) {
+    def p: StringCtx.ExactSeq = StringCtx.ExactSeq(s)
+  }
+
+}
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    import ParserCtx._
+    import StringCtx._
+
+    val p = ("a".p | "b".? ~ "c").!
+    
+    given String = "d"
+    println(p.parse(0))
+
+  }
+}
 
 
 
