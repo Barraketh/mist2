@@ -2,6 +2,7 @@ package com.mistlang.peg
 
 import scala.collection.mutable.ArrayBuffer
 import scala.annotation.tailrec
+import scala.compiletime._
 
 case class Pos(start: Int, end: Int)
 
@@ -52,9 +53,9 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
     
     def |[B <: PValue](other: Parser[B]): Parser[(A | B)] = new Or.OrParser(this, other)
 
-    def ?(using default: Opt.Default[A] ) : Parser[Opt.Out[A]] = new Opt.OptParser(this, default)
+    inline def ? : Parser[Opt.Out[A]] = Opt.OptParser(this)
 
-    def rep(min: Int = 0)(using acc: () => Rep.Accumulator[A]): Parser[Rep.Out[A]] = new Rep.RepParser(this, min, acc)
+    inline def rep(min: Int = 0): Parser[Rep.Out[A]] = Rep.RepParser(this, min)
 
     def log(name: String): Parser[A] = new Log(this, name)
 
@@ -211,22 +212,20 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
       case v: Value[t] => Value(Some(v.value), v.pos)
     }
 
-    trait Default[A <: PValue] {
-      def default(pos: Pos): Out[A]
+    inline def default[A <: PValue](pos: Pos): Out[A] = inline erasedValue[A] match {
+      case _: Matched => Matched(pos)
+      case _: Value[t] => Value(None, pos)
     }
 
-    object Default {
-      given Default[Matched] = pos => Matched(pos)
-      given [T] as Default[Value[T]] = pos => Value(None, pos)
-    }
-
-    case class OptParser[A <: PValue](p: Parser[A], d: Default[A]) extends Parser[Out[A]] {
+    case class OptParser[A <: PValue](p: Parser[A], default: Pos => Out[A]) extends Parser[Out[A]] {
       override def parse(startIdx: Int)(using seq: Repr): PResult[Out[A]] = {
         p.parse(startIdx)
           .map(a => opt(a))
-          .orElse(Right(d.default(Pos(startIdx, startIdx))))
+          .orElse(Right(default(Pos(startIdx, startIdx))))
       }
     }
+
+    inline def OptParser[A <: PValue](p: Parser[A]): OptParser[A] = OptParser[A](p, default[A](_))
   }
 
   // Represents p1.rep -> will run p1 repeatedly until it fails.
@@ -242,24 +241,20 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
       def length: Int
     }
 
-    object Accumulator {
-
-      given (() => Accumulator[Matched]) = () => new Accumulator[Matched] {
-        var length = 0
-        def put(a: Matched): Unit = (length += 1)
-        def get(pos: Pos): Matched = Matched(pos)
-      }
-
-      given [T] as (() => Accumulator[Value[T]]) = () => new Accumulator[Value[T]] {
-        val buffer = new ArrayBuffer[T]()
-        def put(a: Value[T]): Unit = buffer += a.value
-        def get(pos: Pos): Value[ArrayBuffer[T]] = Value(buffer, pos)
-        def length = buffer.length
-      }
+    class MatchedAccumulator extends Accumulator[Matched] {
+      var length = 0
+      def put(a: Matched): Unit = (length += 1)
+      def get(pos: Pos): Matched = Matched(pos)
     }
 
-    class RepParser[A <: PValue](p: Parser[A], min: Int, accBuilder: () => Accumulator[A]) extends Parser[Out[A]] {
+    class ValueAccumulator[T] extends Accumulator[Value[T]] {
+      val buffer = new ArrayBuffer[T]()
+      def put(a: Value[T]): Unit = buffer += a.value
+      def get(pos: Pos): Value[ArrayBuffer[T]] = Value(buffer, pos)
+      def length = buffer.length
+    }
 
+    class RepParser[A <: PValue](p: Parser[A], min: Int, newAccumulator: () => Accumulator[A]) extends Parser[Out[A]] {
       @tailrec
       private def rec(idx: Int, acc: Accumulator[A])(using seq: Repr): Int = { // endIdx
         p.parse(idx) match {
@@ -274,12 +269,22 @@ trait ParserContext[Elem, Repr](elemSeq: ElemSeq[Elem, Repr]) {
       }
 
       override def parse(startIdx: Int)(using seq: Repr): PResult[Out[A]] = {
-        val acc = accBuilder()
+        val acc = newAccumulator()
         val endIdx = rec(startIdx, acc)
         if (acc.length < min) fail(startIdx, endIdx)
         else Right(acc.get(Pos(startIdx, endIdx)))        
       }
     }
+
+    inline def RepParser[A <: PValue](p: Parser[A], min: Int): RepParser[A] = {
+      val builder = (inline erasedValue[A] match {
+        case _: Matched => () => new MatchedAccumulator
+        case _: Value[t] => () => new ValueAccumulator[t]
+      }).asInstanceOf[() => Accumulator[A]]
+
+      new RepParser(p, min, builder)
+    }
+
   }
 
   
